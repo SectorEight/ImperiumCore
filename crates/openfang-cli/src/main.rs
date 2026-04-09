@@ -237,6 +237,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Dashboard authentication [*].
+    #[command(subcommand)]
+    Auth(AuthCommands),
     /// Security tools and audit trail [*].
     #[command(subcommand)]
     Security(SecurityCommands),
@@ -403,6 +406,9 @@ enum HandCommands {
     Activate {
         /// Hand ID (e.g. "clip", "lead", "researcher").
         id: String,
+        /// Optional instance name. Required to run multiple instances of the same hand.
+        #[arg(long, short = 'n')]
+        name: Option<String>,
     },
     /// Deactivate an active hand instance.
     Deactivate {
@@ -677,6 +683,12 @@ enum CronCommands {
         /// Job ID.
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Generate an Argon2id password hash for dashboard authentication.
+    HashPassword,
 }
 
 #[derive(Subcommand)]
@@ -991,7 +1003,7 @@ fn main() {
             HandCommands::List => cmd_hand_list(),
             HandCommands::Active => cmd_hand_active(),
             HandCommands::Install { path } => cmd_hand_install(&path),
-            HandCommands::Activate { id } => cmd_hand_activate(&id),
+            HandCommands::Activate { id, name } => cmd_hand_activate(&id, name),
             HandCommands::Deactivate { id } => cmd_hand_deactivate(&id),
             HandCommands::Info { id } => cmd_hand_info(&id),
             HandCommands::CheckDeps { id } => cmd_hand_check_deps(&id),
@@ -1057,6 +1069,9 @@ fn main() {
         Some(Commands::Sessions { agent, json }) => cmd_sessions(agent.as_deref(), json),
         Some(Commands::Logs { lines, follow }) => cmd_logs(lines, follow),
         Some(Commands::Health { json }) => cmd_health(json),
+        Some(Commands::Auth(sub)) => match sub {
+            AuthCommands::HashPassword => cmd_auth_hash_password(),
+        },
         Some(Commands::Security(sub)) => match sub {
             SecurityCommands::Status { json } => cmd_security_status(json),
             SecurityCommands::Audit { limit, json } => cmd_security_audit(limit, json),
@@ -4356,23 +4371,37 @@ fn cmd_hand_active() {
     }
 }
 
-fn cmd_hand_activate(id: &str) {
+fn cmd_hand_activate(id: &str, name: Option<String>) {
     let base = require_daemon("hand activate");
     let client = daemon_client();
+    let request_body = match &name {
+        Some(n) => serde_json::json!({ "instance_name": n }).to_string(),
+        None => "{}".to_string(),
+    };
     let body = daemon_json(
         client
             .post(format!("{base}/api/hands/{id}/activate"))
             .header("content-type", "application/json")
-            .body("{}")
+            .body(request_body)
             .send(),
     );
     if body.get("instance_id").is_some() {
-        println!(
-            "Hand '{}' activated (instance: {}, agent: {})",
-            id,
-            body["instance_id"].as_str().unwrap_or("?"),
-            body["agent_name"].as_str().unwrap_or("?"),
-        );
+        if let Some(n) = &name {
+            println!(
+                "Hand '{}' activated (instance: {}, name: {}, agent: {})",
+                id,
+                body["instance_id"].as_str().unwrap_or("?"),
+                n,
+                body["agent_name"].as_str().unwrap_or("?"),
+            );
+        } else {
+            println!(
+                "Hand '{}' activated (instance: {}, agent: {})",
+                id,
+                body["instance_id"].as_str().unwrap_or("?"),
+                body["agent_name"].as_str().unwrap_or("?"),
+            );
+        }
     } else {
         eprintln!(
             "Failed to activate hand '{}': {}",
@@ -5983,6 +6012,28 @@ fn cmd_health(json: bool) {
             std::process::exit(1);
         }
     }
+}
+
+fn cmd_auth_hash_password() {
+    let password = prompt_input("Enter password: ");
+    if password.is_empty() {
+        ui::error("Empty password.");
+        std::process::exit(1);
+    }
+    let confirm = prompt_input("Confirm password: ");
+    if password != confirm {
+        ui::error("Passwords do not match.");
+        std::process::exit(1);
+    }
+    let hash = openfang_api::session_auth::hash_password(&password);
+    println!();
+    ui::success("Argon2id hash generated. Add this to your config.toml:");
+    println!();
+    println!("  [auth]");
+    println!("  enabled = true");
+    println!("  password_hash = \"{}\"", hash);
+    println!();
+    ui::hint("Restart the daemon after updating config.toml");
 }
 
 fn cmd_security_status(json: bool) {
